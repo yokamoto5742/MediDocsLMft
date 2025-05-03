@@ -1,4 +1,3 @@
-import streamlit as st
 from utils.exceptions import AppError, AuthError, APIError, DatabaseError
 
 def handle_error(func):

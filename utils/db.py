@@ -1,7 +1,6 @@
 import os
 
 from pymongo import MongoClient
-import streamlit as st
 
 from utils.config import MONGODB_URI
 from utils.exceptions import DatabaseError

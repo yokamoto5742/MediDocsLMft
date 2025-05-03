@@ -1,9 +1,8 @@
 import os
 import ipaddress
 import requests
-
 import bcrypt
-import streamlit as st
+import flet as ft
 from pymongo import MongoClient
 
 from utils.config import get_config, MONGODB_URI, REQUIRE_LOGIN, IP_WHITELIST, IP_CHECK_ENABLED
@@ -103,130 +102,191 @@ def authenticate_user(username, password):
         raise DatabaseError(f"認証中にエラーが発生しました: {str(e)}")
 
 
-@handle_error
-def login_ui():
-    st.title("退院時サマリ作成アプリ - ログイン")
-
-    if "user" not in st.session_state:
-        st.session_state.user = None
-
-    if st.session_state.user is not None:
-        return True
-
-    login_tab, register_tab = st.tabs(["ログイン", "新規登録"])
-
-    with login_tab:
-        username = st.text_input("ユーザー名", key="login_username")
-        password = st.text_input("パスワード", type="password", key="login_password")
-
-        if st.button("ログイン", key="login_button"):
-            if not username or not password:
-                st.error("ユーザー名とパスワードを入力してください")
-                return False
-
-            success, result = authenticate_user(username, password)
-            if success:
-                st.session_state.user = result
-                st.rerun()
-            else:
-                st.error(result)
-                return False
-
-    with register_tab:
-        new_username = st.text_input("ユーザー名", key="register_username")
-        new_password = st.text_input("パスワード", type="password", key="register_password")
-        confirm_password = st.text_input("パスワード（確認）", type="password", key="confirm_password")
-
-        if st.button("登録", key="register_button"):
-            if not new_username or not new_password:
-                st.error("ユーザー名とパスワードを入力してください")
-                return False
-
-            if new_password != confirm_password:
-                st.error("パスワードが一致しません")
-                return False
-
-            # 最初のユーザーを管理者として登録
-            users_collection = get_users_collection()
-            is_first_user = users_collection.count_documents({}) == 0
-
-            success, message = register_user(new_username, new_password, is_admin=is_first_user)
-            if success:
-                st.success(message)
-                if is_first_user:
-                    st.info("あなたに管理者権限が付与されました")
-                return False
-            else:
-                st.error(message)
-                return False
-
-    return False
+def login_ui(page, global_state, on_login_success):
+    """ログイン画面のUI作成"""
+    login_container = ft.Container(
+        content=ft.Column(
+            [
+                ft.Text("退院時サマリ作成アプリ - ログイン", size=30, weight=ft.FontWeight.BOLD),
+                ft.Tabs(
+                    selected_index=0,
+                    tabs=[
+                        ft.Tab(
+                            text="ログイン",
+                            content=ft.Container(
+                                margin=ft.margin.only(top=20),
+                                content=login_form(page, global_state, on_login_success)
+                            ),
+                        ),
+                        ft.Tab(
+                            text="新規登録",
+                            content=ft.Container(
+                                margin=ft.margin.only(top=20),
+                                content=register_form(page, global_state)
+                            ),
+                        ),
+                    ],
+                ),
+            ]
+        )
+    )
+    return login_container
 
 
-def logout():
-    if "user" in st.session_state:
-        st.session_state.user = None
-        return True
-    return False
+def login_form(page, global_state, on_login_success):
+    """ログインフォームの作成"""
+    login_username = ft.TextField(label="ユーザー名", width=300)
+    login_password = ft.TextField(label="パスワード", password=True, width=300)
+    error_text = ft.Text("", color=ft.colors.RED)
+
+    def handle_login(e):
+        if not login_username.value or not login_password.value:
+            error_text.value = "ユーザー名とパスワードを入力してください"
+            page.update()
+            return
+
+        success, result = authenticate_user(login_username.value, login_password.value)
+        if success:
+            global_state["user"] = result
+            on_login_success()
+        else:
+            error_text.value = result
+            page.update()
+
+    return ft.Column([
+        login_username,
+        login_password,
+        error_text,
+        ft.ElevatedButton("ログイン", on_click=handle_login)
+    ], spacing=20)
 
 
-def require_login():
-    """ログインが必要なページの保護"""
-    if "user" not in st.session_state or st.session_state.user is None:
-        login_ui()
-        return False
+def register_form(page, global_state):
+    """新規登録フォームの作成"""
+    register_username = ft.TextField(label="ユーザー名", width=300)
+    register_password = ft.TextField(label="パスワード", password=True, width=300)
+    confirm_password = ft.TextField(label="パスワード（確認）", password=True, width=300)
+    message_text = ft.Text("", color=ft.colors.RED)
+
+    def handle_register(e):
+        if not register_username.value or not register_password.value:
+            message_text.value = "ユーザー名とパスワードを入力してください"
+            message_text.color = ft.colors.RED
+            page.update()
+            return
+
+        if register_password.value != confirm_password.value:
+            message_text.value = "パスワードが一致しません"
+            message_text.color = ft.colors.RED
+            page.update()
+            return
+
+        # 最初のユーザーを管理者として登録
+        users_collection = get_users_collection()
+        is_first_user = users_collection.count_documents({}) == 0
+
+        success, msg = register_user(register_username.value, register_password.value, is_admin=is_first_user)
+        if success:
+            message_text.value = msg
+            message_text.color = ft.colors.GREEN
+            if is_first_user:
+                message_text.value += "\nあなたに管理者権限が付与されました"
+            # フォームをクリア
+            register_username.value = ""
+            register_password.value = ""
+            confirm_password.value = ""
+        else:
+            message_text.value = msg
+            message_text.color = ft.colors.RED
+        page.update()
+
+    return ft.Column([
+        register_username,
+        register_password,
+        confirm_password,
+        message_text,
+        ft.ElevatedButton("登録", on_click=handle_register)
+    ], spacing=20)
+
+
+def logout(global_state):
+    """ログアウト処理"""
+    global_state["user"] = None
     return True
 
 
-def get_current_user():
-    if "user" in st.session_state:
-        return st.session_state.user
-    return None
+def require_login(global_state):
+    """ログインが必要かどうかをチェック"""
+    return global_state["user"] is not None
 
 
-def is_admin():
+def get_current_user(global_state):
+    """現在のユーザー情報を取得"""
+    return global_state["user"]
+
+
+def is_admin(global_state):
     """現在のユーザーが管理者かどうかを確認"""
-    user = get_current_user()
+    user = get_current_user(global_state)
     if user:
         return user.get("is_admin", False)
     return False
 
 
-@handle_error
-def password_change_ui():
-    st.subheader("パスワード変更")
+def password_change_ui(page, global_state):
+    """パスワード変更画面のUI作成"""
+    current_password = ft.TextField(label="現在のパスワード", password=True, width=300)
+    new_password = ft.TextField(label="新しいパスワード", password=True, width=300)
+    confirm_new_password = ft.TextField(label="新しいパスワード（確認）", password=True, width=300)
+    message_text = ft.Text("", color=ft.colors.RED)
 
-    user = get_current_user()
+    user = global_state["user"]
     if not user:
-        raise AuthError("ログインが必要です")
+        return ft.Text("ログインが必要です", color=ft.colors.RED)
 
-    current_password = st.text_input("現在のパスワード", type="password", key="current_password")
-    new_password = st.text_input("新しいパスワード", type="password", key="new_password")
-    confirm_new_password = st.text_input("新しいパスワード（確認）", type="password", key="confirm_new_password")
-
-    if st.button("パスワードを変更", key="change_password_button"):
-        if not current_password or not new_password or not confirm_new_password:
-            st.error("すべての項目を入力してください")
+    def handle_password_change(e):
+        if not current_password.value or not new_password.value or not confirm_new_password.value:
+            message_text.value = "すべての項目を入力してください"
+            message_text.color = ft.colors.RED
+            page.update()
             return
 
-        if new_password != confirm_new_password:
-            st.error("新しいパスワードが一致しません")
+        if new_password.value != confirm_new_password.value:
+            message_text.value = "新しいパスワードが一致しません"
+            message_text.color = ft.colors.RED
+            page.update()
             return
 
-        success, message = change_password(user["username"], current_password, new_password)
+        success, msg = change_password(user["username"], current_password.value, new_password.value)
         if success:
-            st.success(message)
+            message_text.value = msg
+            message_text.color = ft.colors.GREEN
+            # フォームをクリア
+            current_password.value = ""
+            new_password.value = ""
+            confirm_new_password.value = ""
         else:
-            st.error(message)
+            message_text.value = msg
+            message_text.color = ft.colors.RED
+        page.update()
+
+    return ft.Column([
+        ft.Text("パスワード変更", size=20, weight=ft.FontWeight.BOLD),
+        current_password,
+        new_password,
+        confirm_new_password,
+        message_text,
+        ft.ElevatedButton("パスワードを変更", on_click=handle_password_change)
+    ], spacing=20)
 
 
-def can_edit_prompts():
+def can_edit_prompts(global_state):
+    """プロンプト編集権限があるかどうかをチェック"""
     # ログイン不要モードの場合は誰でも編集可能
     if not REQUIRE_LOGIN:
         return True
-
     # ログイン必須モードの場合は管理者のみ編集可能
-    return is_admin()
+    return is_admin(global_state)
 
 
 def is_ip_allowed(ip, whitelist_str):
@@ -275,31 +335,15 @@ def get_client_ip():
     except Exception as e:
         print(f"外部サービスからのIP取得エラー: {str(e)}")
 
-    # 方法3: リクエストからIPを取得（Streamlitの制約上、動作しない可能性あり）
-    try:
-        import tornado.web
-        handler = tornado.web.RequestHandler()
-        ip = handler.request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        if ip:
-            print(f"Tornadoリクエストから取得したIP: {ip}")
-            return ip
-    except Exception as e:
-        print(f"TornadoリクエストからのIP取得エラー: {str(e)}")
-
     # すべての方法が失敗した場合はデフォルト値を返す
     default_ip = os.environ.get("REMOTE_ADDR", "127.0.0.1")
     print(f"デフォルトIPを使用: {default_ip}")
     return default_ip
 
 
-# check_ip_access 関数にデバッグ情報を追加
-def check_ip_access(whitelist_str):
+def check_ip_access(whitelist_str, page):
     """IPアドレスのアクセス制限をチェック"""
     client_ip = get_client_ip()
-
-    # デバッグ情報
-    st.write(f"検出されたIPアドレス: {client_ip}")
-    st.write(f"アクセス許可IPリスト: {whitelist_str}")
 
     # IPが直接一致するか確認（ホワイトリスト内に完全一致するIPがある場合）
     if client_ip in [ip.strip() for ip in whitelist_str.split(',')]:
@@ -307,9 +351,6 @@ def check_ip_access(whitelist_str):
 
     # CIDR表記との照合など、より複雑なチェックは is_ip_allowed 関数に任せる
     if not is_ip_allowed(client_ip, whitelist_str):
-        st.title("アクセスが制限されています")
-        st.error(f"このIPアドレス（{client_ip}）からはアクセスできません。")
-        st.info("このシステムはIPアドレスによるアクセス制限が設定されています。")
-        st.info("システム管理者にお問い合わせください。")
         return False
+
     return True

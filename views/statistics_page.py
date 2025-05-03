@@ -1,161 +1,400 @@
+import flet as ft
 import datetime
-import pytz
-
-import pandas as pd
-import streamlit as st
-
-from utils.constants import DOCUMENT_NAME_OPTIONS
-from utils.error_handlers import handle_error
+from ui_components.navigation import render_sidebar
 from utils.db import get_usage_collection
-from ui_components.navigation import change_page
-
-JST = pytz.timezone('Asia/Tokyo')
-
-MODEL_MAPPING = {
-    "Gemini_Pro": {"pattern": "gemini", "exclude": "flash"},
-    "Gemini_Flash": {"pattern": "flash", "exclude": None},
-    "Claude": {"pattern": "claude", "exclude": None},
-    "GPT4.1": {"pattern": "gpt4.1", "exclude": None},
-}
+from utils.constants import DOCUMENT_NAME_OPTIONS
 
 
-@handle_error
-def usage_statistics_ui():
-    if st.button("作成画面に戻る", key="back_to_main_from_stats"):
-        change_page("main")
-        st.rerun()
+def usage_statistics_ui(page, global_state, navigate_to):
+    """統計情報表示画面のUI"""
 
-    usage_collection = get_usage_collection()
+    # 日付範囲指定用のコントロール
+    now = datetime.datetime.now()
+    start_date = now - datetime.timedelta(days=30)
 
-    col1, col2 = st.columns(2)
+    start_date_picker = ft.DatePicker(
+        first_date=datetime.datetime(2023, 1, 1),
+        last_date=now,
+        value=start_date.strftime("%Y-%m-%d")
+    )
 
-    with col1:
-        today = datetime.datetime.now().date()
-        start_date = st.date_input("開始日", today - datetime.timedelta(days=7))
+    end_date_picker = ft.DatePicker(
+        first_date=datetime.datetime(2023, 1, 1),
+        last_date=now + datetime.timedelta(days=1),
+        value=now.strftime("%Y-%m-%d")
+    )
 
-    with col2:
-        models = ["すべて", "Claude", "Gemini_Pro", "Gemini_Flash", "GPT4.1"]
-        selected_model = st.selectbox("AIモデル", models, index=0)
+    page.overlay.append(start_date_picker)
+    page.overlay.append(end_date_picker)
 
-    col3, col4 = st.columns(2)
+    start_date_button = ft.ElevatedButton(
+        "開始日を選択",
+        icon=ft.icons.CALENDAR_TODAY,
+        on_click=lambda _: start_date_picker.pick_date()
+    )
 
-    with col3:
-        end_date = st.date_input("終了日", today)
+    end_date_button = ft.ElevatedButton(
+        "終了日を選択",
+        icon=ft.icons.CALENDAR_TODAY,
+        on_click=lambda _: end_date_picker.pick_date()
+    )
 
-    with col4:
-        selected_document_name = st.selectbox("文書名", DOCUMENT_NAME_OPTIONS, index=0)
+    # 統計タイプセレクター
+    stats_type = ft.Tabs(
+        selected_index=0,
+        tabs=[
+            ft.Tab(text="日別集計"),
+            ft.Tab(text="診療科別集計"),
+            ft.Tab(text="モデル別集計")
+        ]
+    )
 
-    start_datetime = datetime.datetime.combine(start_date, datetime.time.min)
-    end_datetime = datetime.datetime.combine(end_date, datetime.time.max)
+    # ドキュメントタイプセレクター
+    doc_type_dropdown = ft.Dropdown(
+        label="文書タイプ",
+        options=[
+            ft.dropdown.Option(key=doc_type, text=doc_type)
+            for doc_type in DOCUMENT_NAME_OPTIONS
+        ],
+        value=DOCUMENT_NAME_OPTIONS[0]
+    )
 
-    query = {
-        "date": {
-            "$gte": start_datetime,
-            "$lte": end_datetime
-        }
-    }
+    # 統計データ表示エリア
+    stats_display = ft.Container(
+        content=ft.Text("統計情報を読み込んでいます..."),
+        expand=True
+    )
 
-    if selected_model != "すべて":
-        model_config = MODEL_MAPPING.get(selected_model)
-        if model_config:
-            query["model_detail"] = {"$regex": model_config["pattern"], "$options": "i"}
-            if model_config["exclude"]:
-                query["model_detail"]["$not"] = {"$regex": model_config["exclude"], "$options": "i"}
+    # エラー表示
+    error_text = ft.Text("", color=ft.colors.RED)
 
-    if selected_document_name != "すべて":
-        if selected_document_name == "不明":
-            query["document_name"] = {"$exists": False}
-        else:
-            query["document_name"] = selected_document_name
+    # 統計データの取得・表示
+    def load_statistics():
+        try:
+            start_str = start_date_picker.value
+            end_str = end_date_picker.value
 
-    total_summary = usage_collection.aggregate([
-        {"$match": query},
-        {"$group": {
-            "_id": None,
-            "count": {"$sum": 1},
-            "total_input_tokens": {"$sum": "$input_tokens"},
-            "total_output_tokens": {"$sum": "$output_tokens"},
-            "total_tokens": {"$sum": "$total_tokens"}
-        }}
-    ])
+            if not start_str or not end_str:
+                error_text.value = "日付範囲を指定してください"
+                page.update()
+                return
 
-    total_summary = list(total_summary)
+            start = datetime.datetime.strptime(start_str, "%Y-%m-%d")
+            end = datetime.datetime.strptime(end_str, "%Y-%m-%d") + datetime.timedelta(days=1)
 
-    if not total_summary:
-        st.info("指定した期間のデータがありません")
-        return
+            # 日付の前後チェック
+            if start > end:
+                error_text.value = "開始日は終了日より前の日付を指定してください"
+                page.update()
+                return
 
-    dept_summary = usage_collection.aggregate([
-        {"$match": query},
-        {"$group": {
-            "_id": {"department": "$department", "document_name": "$document_name"},
-            "count": {"$sum": 1},
-            "input_tokens": {"$sum": "$input_tokens"},
-            "output_tokens": {"$sum": "$output_tokens"},
-            "total_tokens": {"$sum": "$total_tokens"},
-            "processing_time": {"$sum": "$processing_time"}
-        }},
-        {"$sort": {"count": -1}}
-    ])
-    dept_summary = list(dept_summary)
+            doc_type = doc_type_dropdown.value
+            tab_index = stats_type.selected_index
 
-    records = usage_collection.find(
-        query,
-        {
-            "date": 1,
-            "document_name": 1,
-            "model_detail": 1,
-            "department": 1,
-            "input_tokens": 1,
-            "output_tokens": 1,
-            "processing_time": 1,
-            "_id": 0
-        }
-    ).sort("date", -1)
+            # MongoDB からデータ取得
+            usage_collection = get_usage_collection()
 
-    data = []
-    for stat in dept_summary:
-        dept_name = "全科共通" if stat["_id"]["department"] == "default" else stat["_id"]["department"]
-        document_name = stat["_id"].get("document_name", "不明")
-        data.append({
-            "診療科": dept_name,
-            "文書名": document_name,
-            "作成件数": stat["count"],
-            "入力トークン": stat["input_tokens"],
-            "出力トークン": stat["output_tokens"],
-            "合計トークン": stat["total_tokens"],
-        })
+            # クエリの構築
+            query = {
+                "date": {"$gte": start, "$lt": end}
+            }
 
-    df = pd.DataFrame(data)
-    st.dataframe(df, hide_index=True)
+            if doc_type != "すべて":
+                query["document_name"] = doc_type
 
-    detail_data = []
-    for record in records:
-        model_detail = str(record.get("model_detail", "")).lower()
-        model_info = "Claude"  # デフォルト値
+            # データ取得
+            data = list(usage_collection.find(query))
 
-        for model_name, config in MODEL_MAPPING.items():
-            pattern = config["pattern"]
-            exclude = config["exclude"]
+            if not data:
+                stats_display.content = ft.Text("データがありません")
+                error_text.value = ""
+                page.update()
+                return
 
-            if pattern in model_detail:
-                if exclude and exclude in model_detail:
-                    continue
-                model_info = model_name
-                break
+            # データフレームに変換して集計
+            df = pd.DataFrame(data)
 
-        jst_date = record["date"].astimezone(JST) if record["date"].tzinfo else JST.localize(record["date"])
+            if tab_index == 0:  # 日別集計
+                display_daily_stats(df)
+            elif tab_index == 1:  # 診療科別集計
+                display_department_stats(df)
+            else:  # モデル別集計
+                display_model_stats(df)
 
-        detail_data.append({
-            "作成日": jst_date.strftime("%Y/%m/%d"),
-            "診療科": "全科共通" if record.get("department") == "default" else record.get("department"),
-            "文書名": record.get("document_name", "不明"),
-            "AIモデル": model_info,
-            "入力トークン": record["input_tokens"],
-            "出力トークン": record["output_tokens"],
+            error_text.value = ""
+            page.update()
 
-            "処理時間(秒)": round(record["processing_time"]),
-        })
+        except Exception as e:
+            error_text.value = f"統計情報の取得中にエラーが発生しました: {str(e)}"
+            page.update()
 
-    detail_df = pd.DataFrame(detail_data)
-    st.dataframe(detail_df, hide_index=True)
+    # 日別統計の表示
+    def display_daily_stats(df):
+        try:
+            # 日付ごとに集計
+            df['date_str'] = df['date'].dt.strftime('%Y-%m-%d')
+            daily_stats = df.groupby('date_str').agg({
+                'input_tokens': 'sum',
+                'output_tokens': 'sum',
+                'total_tokens': 'sum',
+                'processing_time': 'mean',
+                'document_name': 'count'
+            }).reset_index()
+
+            daily_stats = daily_stats.rename(columns={'document_name': 'count'})
+            daily_stats['processing_time'] = daily_stats['processing_time'].round(1)
+
+            # 表の作成
+            table_rows = []
+            for _, row in daily_stats.iterrows():
+                table_row = ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(row['date_str'])),
+                        ft.DataCell(ft.Text(str(row['count']))),
+                        ft.DataCell(ft.Text(f"{row['input_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['output_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['total_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['processing_time']:.1f}秒"))
+                    ]
+                )
+                table_rows.append(table_row)
+
+            # 合計行の追加
+            total_count = daily_stats['count'].sum()
+            total_input = daily_stats['input_tokens'].sum()
+            total_output = daily_stats['output_tokens'].sum()
+            total_tokens = daily_stats['total_tokens'].sum()
+            avg_time = daily_stats['processing_time'].mean()
+
+            total_row = ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text("合計/平均", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(str(total_count), weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_input:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_output:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_tokens:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{avg_time:.1f}秒", weight=ft.FontWeight.BOLD))
+                ]
+            )
+            table_rows.append(total_row)
+
+            # テーブルの作成
+            table = ft.DataTable(
+                columns=[
+                    ft.DataColumn(ft.Text("日付")),
+                    ft.DataColumn(ft.Text("処理数")),
+                    ft.DataColumn(ft.Text("入力トークン")),
+                    ft.DataColumn(ft.Text("出力トークン")),
+                    ft.DataColumn(ft.Text("合計トークン")),
+                    ft.DataColumn(ft.Text("平均処理時間"))
+                ],
+                rows=table_rows
+            )
+
+            stats_display.content = table
+
+        except Exception as e:
+            stats_display.content = ft.Text(f"データの集計中にエラーが発生しました: {str(e)}")
+
+    # 診療科別統計の表示
+    def display_department_stats(df):
+        try:
+            # 診療科ごとに集計
+            dept_stats = df.groupby('department').agg({
+                'input_tokens': 'sum',
+                'output_tokens': 'sum',
+                'total_tokens': 'sum',
+                'processing_time': 'mean',
+                'document_name': 'count'
+            }).reset_index()
+
+            dept_stats = dept_stats.rename(columns={'document_name': 'count'})
+            dept_stats['processing_time'] = dept_stats['processing_time'].round(1)
+
+            # デフォルト診療科の表示名を変更
+            dept_stats['department'] = dept_stats['department'].replace('default', '全科共通')
+
+            # 表の作成
+            table_rows = []
+            for _, row in dept_stats.iterrows():
+                table_row = ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(row['department'])),
+                        ft.DataCell(ft.Text(str(row['count']))),
+                        ft.DataCell(ft.Text(f"{row['input_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['output_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['total_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['processing_time']:.1f}秒"))
+                    ]
+                )
+                table_rows.append(table_row)
+
+            # 合計行の追加
+            total_count = dept_stats['count'].sum()
+            total_input = dept_stats['input_tokens'].sum()
+            total_output = dept_stats['output_tokens'].sum()
+            total_tokens = dept_stats['total_tokens'].sum()
+            avg_time = dept_stats['processing_time'].mean()
+
+            total_row = ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text("合計/平均", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(str(total_count), weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_input:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_output:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_tokens:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{avg_time:.1f}秒", weight=ft.FontWeight.BOLD))
+                ]
+            )
+            table_rows.append(total_row)
+
+            # テーブルの作成
+            table = ft.DataTable(
+                columns=[
+                    ft.DataColumn(ft.Text("診療科")),
+                    ft.DataColumn(ft.Text("処理数")),
+                    ft.DataColumn(ft.Text("入力トークン")),
+                    ft.DataColumn(ft.Text("出力トークン")),
+                    ft.DataColumn(ft.Text("合計トークン")),
+                    ft.DataColumn(ft.Text("平均処理時間"))
+                ],
+                rows=table_rows
+            )
+
+            stats_display.content = table
+
+        except Exception as e:
+            stats_display.content = ft.Text(f"データの集計中にエラーが発生しました: {str(e)}")
+
+    # モデル別統計の表示
+    def display_model_stats(df):
+        try:
+            # モデルごとに集計
+            model_stats = df.groupby('model_detail').agg({
+                'input_tokens': 'sum',
+                'output_tokens': 'sum',
+                'total_tokens': 'sum',
+                'processing_time': 'mean',
+                'document_name': 'count'
+            }).reset_index()
+
+            model_stats = model_stats.rename(columns={'document_name': 'count'})
+            model_stats['processing_time'] = model_stats['processing_time'].round(1)
+
+            # 表の作成
+            table_rows = []
+            for _, row in model_stats.iterrows():
+                table_row = ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(row['model_detail'])),
+                        ft.DataCell(ft.Text(str(row['count']))),
+                        ft.DataCell(ft.Text(f"{row['input_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['output_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['total_tokens']:,}")),
+                        ft.DataCell(ft.Text(f"{row['processing_time']:.1f}秒"))
+                    ]
+                )
+                table_rows.append(table_row)
+
+            # 合計行の追加
+            total_count = model_stats['count'].sum()
+            total_input = model_stats['input_tokens'].sum()
+            total_output = model_stats['output_tokens'].sum()
+            total_tokens = model_stats['total_tokens'].sum()
+            avg_time = model_stats['processing_time'].mean()
+
+            total_row = ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text("合計/平均", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(str(total_count), weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_input:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_output:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{total_tokens:,}", weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(f"{avg_time:.1f}秒", weight=ft.FontWeight.BOLD))
+                ]
+            )
+            table_rows.append(total_row)
+
+            # テーブルの作成
+            table = ft.DataTable(
+                columns=[
+                    ft.DataColumn(ft.Text("AIモデル")),
+                    ft.DataColumn(ft.Text("処理数")),
+                    ft.DataColumn(ft.Text("入力トークン")),
+                    ft.DataColumn(ft.Text("出力トークン")),
+                    ft.DataColumn(ft.Text("合計トークン")),
+                    ft.DataColumn(ft.Text("平均処理時間"))
+                ],
+                rows=table_rows
+            )
+
+            stats_display.content = table
+
+        except Exception as e:
+            stats_display.content = ft.Text(f"データの集計中にエラーが発生しました: {str(e)}")
+
+    # 検索ボタンのイベントハンドラ
+    def on_search(e):
+        load_statistics()
+
+    # タブ切り替え時のイベントハンドラ
+    def on_tab_change(e):
+        load_statistics()
+
+    stats_type.on_change = on_tab_change
+
+    # メイン画面に戻るボタン
+    def back_to_main(e):
+        navigate_to("main")
+
+    # 初期データの読み込み
+    load_statistics()
+
+    # サイドバーと本体のレイアウト
+    content = ft.Row([
+        render_sidebar(page, global_state, navigate_to),
+        ft.VerticalDivider(width=1),
+        ft.Column([
+            ft.Container(
+                content=ft.Row([
+                    ft.Text("統計情報", size=28, weight=ft.FontWeight.BOLD),
+                    ft.ElevatedButton("メイン画面に戻る", on_click=back_to_main)
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                margin=ft.margin.only(bottom=20)
+            ),
+            ft.Card(
+                content=ft.Container(
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Column([
+                                ft.Text("期間を選択", size=16),
+                                ft.Row([
+                                    start_date_button,
+                                    end_date_button,
+                                ])
+                            ]),
+                            ft.Column([
+                                ft.Text("表示項目", size=16),
+                                ft.Row([
+                                    doc_type_dropdown,
+                                    ft.ElevatedButton("検索", on_click=on_search)
+                                ])
+                            ])
+                        ]),
+                        stats_type,
+                        error_text
+                    ]),
+                    padding=20
+                )
+            ),
+            ft.Card(
+                content=ft.Container(
+                    content=stats_display,
+                    padding=20
+                ),
+                expand=True
+            )
+        ], expand=True, spacing=20)
+    ], expand=True)
+
+    return content
