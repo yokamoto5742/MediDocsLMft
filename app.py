@@ -1,3 +1,5 @@
+import os
+
 import flet as ft
 from utils.auth import login_ui, require_login, check_ip_access
 from utils.config import REQUIRE_LOGIN, IP_CHECK_ENABLED, IP_WHITELIST
@@ -107,4 +109,5 @@ def run_app():
 
 
 if __name__ == "__main__":
-    run_app()
+    port = int(os.environ.get("PORT", 5000))
+    ft.app(target=main, port=port, view=None)
